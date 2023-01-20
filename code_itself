@@ -1,0 +1,182 @@
+import pandas as pd
+import numpy as np
+from matplotlib import pyplot as plt
+
+#сначала загрузим данные
+
+data_train = pd.read_csv('./train.csv')
+data_test = pd.read_csv('./test.csv')
+
+# Числовые признаки
+num_cols = [
+    'ClientPeriod',
+    'MonthlySpending',
+    'TotalSpent'
+]
+
+# Категориальные признаки
+cat_cols = [
+    'Sex',
+    'IsSeniorCitizen',
+    'HasPartner',
+    'HasChild',
+    'HasPhoneService',
+    'HasMultiplePhoneNumbers',
+    'HasInternetService',
+    'HasOnlineSecurityService',
+    'HasOnlineBackup',
+    'HasDeviceProtection',
+    'HasTechSupportAccess',
+    'HasOnlineTV',
+    'HasMovieSubscription',
+    'HasContractPhone',
+    'IsBillingPaperless',
+    'PaymentMethod'
+]
+
+feature_cols = num_cols + cat_cols
+target_col = 'Churn'
+
+#посмотрели на данные
+data_train.sample(10)
+data_train.info()
+
+# TotalSpent                5282 non-null   object,  а должно быть число
+
+data_train.isna().sum()
+
+#нанов нет, значит, проблема в другом
+
+data_train=data_train.replace([' ',''], np.nan)
+
+data_train.isna().sum()
+
+#появились наны, удалим их, проверим, поменяем тип данных на float
+
+data_train=data_train.dropna()
+data_train.isna().sum()
+data_train['TotalSpent']=data_train['TotalSpent'].astype(float)
+data_train.info()
+data_train.describe()
+#данные имеют необходимый тип, перейдем к визуализации данных
+
+
+#построим гистограммы для численных признаков и круговые диаграммы для категориальных признаков
+
+for i in num_cols:
+  plt.subplots()
+  plt.title(i)
+  plt.hist(data_train[i], bins=np.arange(min(data_train[i]), max(data_train[i])))
+
+#хотя третий график явно плохо отскалирован, но по нему и так видно, что выбросов нет
+
+for i in cat_cols:
+  plt.subplots()
+  plt.title(i)
+  plt.pie(data_train[i].value_counts(), labels=data_train[i].unique())
+
+plt.subplots()
+plt.title('Churn')
+plt.pie(data_train[target_col].value_counts(), labels=data_train[target_col].unique())
+
+#классы выглядят сбалансированно, явных выбросов нет, поэтому постобработка данных проводиться не будет
+
+#data_train.hist(column=num_cols+cat_cols+[target_col], figsize=(14, 10))
+
+
+#Сначала проанализируем данные с помощью линейных моделей
+
+from sklearn.linear_model import LogisticRegression, LogisticRegressionCV
+from sklearn.model_selection import train_test_split, GridSearchCV
+from sklearn.preprocessing import StandardScaler, RobustScaler, LabelEncoder, OneHotEncoder
+from sklearn.pipeline import make_pipeline
+from sklearn.compose import ColumnTransformer
+
+y=data_train['Churn']
+d_train=data_train[feature_cols]
+
+#Column Transformer is a sciket-learn class used to create and apply separate transformers for numerical and categorical data. воспользуемся им для удобства
+
+data_prep = ColumnTransformer([ ('num', StandardScaler(), num_cols),
+        ('cat', OneHotEncoder(sparse=False), cat_cols)])
+
+#Чтобы использовать кроссвалидацию, соединим преобразования данных и LogisticRegression в один Pipeline 
+
+cls = make_pipeline(
+    data_prep,
+    LogisticRegression( max_iter=1000)
+    )
+
+parameters = {'logisticregression__C': [100, 10, 1, 0.1, 0.01, 0.001]}
+
+model_1 = GridSearchCV(cls, parameters, scoring='roc_auc', refit=True)
+
+model_1.fit(d_train, y)
+
+print(model_1.best_score_)
+print(model_1.best_params_)
+
+
+#попробуем градиентный бустинг
+from catboost import CatBoostClassifier
+# Разделила выборку на train/valid. Протестировала catboost cо стандартными параметрами.
+
+X_tra, X_vali, y_tra, y_vali = train_test_split(d_train, y, test_size=0.2, random_state=42)
+cat_boo_standart = CatBoostClassifier()
+cat_boo_standart.fit(X_tra, y_tra, cat_features=cat_cols)
+y_train_predictedCB = cat_boo_standart.predict_proba(X_tra)[:, 1]
+y_val_predictedCB = cat_boo_standart.predict_proba(X_vali)[:, 1]
+
+
+train_auc_CB = roc_auc_score(y_tra, y_train_predictedCB)
+val_auc = roc_auc_score(y_vali, y_val_predictedCB)
+print (train_auc_CB)
+print (val_auc)
+
+#Протестировала разные занчения параметроа количества деревьев и learning_rate'а и выбираю лучшую по метрике ROC-AUC комбинацию.
+
+boosting_model = CatBoostClassifier(loss_function='Logloss',
+    cat_features=cat_cols,
+    random_seed = 42,
+    eval_metric='AUC',
+    verbose=False)
+
+boosting_model.grid_search({'l2_leaf_reg': np.linspace(0, 1, 20),
+                            'max_depth': [3],
+                            'learning_rate': np.linspace(0.01, 0.18, 14)
+                            }, 
+                           X_tra, 
+                           y_tra, 
+                           cv=3, 
+                           refit=True,
+                           verbose=False)
+                           
+# напишу здесь лучшие параметры, т к поиск идет оочень долго
+'params': {'depth': 3,
+  'l2_leaf_reg': 0.05263157894736842,
+  'learning_rate': 0.14076923076923076}}
+cat_boo_best = CatBoostClassifier(
+    depth=3,
+    eval_metric='AUC',
+    l2_leaf_reg=0.0526,
+    learning_rate=0.1,
+    loss_function='Logloss',
+    cat_features=cat_cols,
+    random_seed=42,
+  verbose=200)
+ 
+cat_boo_best.fit(X_tra, y_tra)
+y_tra_predict=cat_boo_best.predict_proba(X_tra)[:,1]
+
+print(roc_auc_score(y_tra, y_tra_predict))
+
+best_model = cat_boo_best
+
+#сохраню полученные предсказания на лучшей модели
+X_test = pd.read_csv('./test.csv')
+submission = pd.read_csv('./submission.csv')
+
+submission['Churn'] = best_model.predict_proba(X_test)[:,1]
+submission.to_csv('./my_submission5.csv', index=False)
+
+submission.head()
